@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 # Local imports
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 import models
 import auth
 
@@ -170,18 +170,21 @@ async def sse_endpoint(request: Request, device_id: str, db: Session = Depends(g
             if device_id in active_connections:
                 del active_connections[device_id]
             
-            # Mark as offline
-            device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
-            if device:
-                device.status = "offline"
-                db.commit()
+            # Mark as offline using a fresh DB session
+            db_local = SessionLocal()
+            try:
+                device = db_local.query(models.Device).filter(models.Device.device_id == device_id).first()
+                if device:
+                    device.status = "offline"
+                    db_local.commit()
+            finally:
+                db_local.close()
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }
     )
