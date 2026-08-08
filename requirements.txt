@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+razorpay
+python-dotenv
+websockets
+sqlalchemy
+jinja2
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+psycopg2-binary

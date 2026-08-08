@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Admin Dashboard</title>
+    
+    <!-- Tailwind CSS v3 via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Custom Config for Tailwind -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkbg: '#0F172A',
+                        cardbg: '#1E293B',
+                        primary: '#3B82F6',
+                        accent: '#10B981'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0F172A;
+            color: #F8FAFC;
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1E293B; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748B; 
+        }
+        /* Glassmorphism utility */
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Fade in animation */
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="min-h-screen antialiased flex flex-col">
+
+    <!-- Navbar -->
+    {% block navbar %}
+    <nav class="glass sticky top-0 z-50 w-full px-6 py-4 flex justify-between items-center shadow-md">
+        <div class="flex items-center gap-3">
+            <div class="bg-primary text-white p-2 rounded-lg">
+                <i class="fa-solid fa-microchip"></i>
+            </div>
+            <span class="text-xl font-bold tracking-wider">ESP32 <span class="text-primary">Admin</span></span>
+        </div>
+        <div>
+            {% if username %}
+                <span class="mr-4 text-gray-300 text-sm"><i class="fa-solid fa-user mr-2"></i>{{ username }}</span>
+                <a href="/admin/logout" class="text-sm bg-red-500/20 text-red-400 hover:bg-red-500/40 px-4 py-2 rounded-md transition-colors"><i class="fa-solid fa-right-from-bracket mr-2"></i>Logout</a>
+            {% endif %}
+        </div>
+    </nav>
+    {% endblock %}
+
+    <!-- Main Content -->
+    <main class="flex-grow p-6 animate-fade-in">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="text-center p-4 text-gray-500 text-sm mt-auto border-t border-gray-800">
+        &copy; 2026 ESP32 Razorpay System. All rights reserved.
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
