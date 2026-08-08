@@ -1,11 +1,12 @@
 import os
 import json
 import logging
+import asyncio
 from typing import Dict, List
 import datetime
 
-from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect, Depends, status, Form
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Request, HTTPException, Depends, status, Form
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,13 +43,12 @@ logger = logging.getLogger(__name__)
 # Ensure the 'templates' folder exists in the same directory as main.py
 templates = Jinja2Templates(directory="templates")
 
-# In-memory storage for active WebSocket connections
-# Mapping of device_id (or reference_id) -> WebSocket
-active_connections: Dict[str, WebSocket] = {}
+# In-memory storage for active SSE queues
+# Mapping of device_id -> asyncio.Queue
+active_connections: Dict[str, asyncio.Queue] = {}
 
-
-
-# --- Admin Dashboard UI Routes ---
+class DeviceStatusRequest(BaseModel):
+    action: str# --- Admin Dashboard UI Routes ---
 
 @app.get("/admin/login", response_class=HTMLResponse)
 async def login_page(request: Request):
@@ -128,60 +128,68 @@ async def get_logs(db: Session = Depends(get_db), current_user: str = Depends(au
 
 
 
-@app.websocket("/ws/status/{device_id}")
-async def websocket_endpoint(websocket: WebSocket, device_id: str, db: Session = Depends(get_db)):
+@app.get("/api/stream/status/{device_id}")
+async def sse_endpoint(request: Request, device_id: str, db: Session = Depends(get_db)):
     """
-    ESP32 connects here to receive push notifications of payment status,
-    and simultaneously registers itself as ONLINE.
+    ESP32 connects here to receive SSE push notifications of payment status.
     """
-    await websocket.accept()
-    active_connections[device_id] = websocket
-    
-    client_ip = websocket.client.host if websocket.client else "unknown"
+    client_ip = request.client.host if request.client else "unknown"
     
     # Update device status in DB
     device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
     if not device:
-        device = models.Device(device_id=device_id, ip_address=client_ip, status="online", current_action="Connected")
+        device = models.Device(device_id=device_id, ip_address=client_ip, status="online", current_action="Connected (SSE)")
         db.add(device)
     else:
         device.status = "online"
         device.ip_address = client_ip
         device.last_ping = datetime.datetime.utcnow()
-        device.current_action = "Connected"
+        device.current_action = "Connected (SSE)"
     db.commit()
     
-    logger.info(f"WebSocket connected for device_id: {device_id}")
-    try:
-        while True:
-            # Simple heartbeat loop
-            data = await websocket.receive_text()
-            logger.info(f"Received from ESP32 ({device_id}): {data}")
+    logger.info(f"SSE connected for device_id: {device_id}")
+    
+    queue = asyncio.Queue()
+    active_connections[device_id] = queue
+    
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.info(f"SSE disconnected by client for device_id: {device_id}")
+                    break
+                    
+                try:
+                    # Wait for message with a timeout to check for disconnects
+                    data = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send a comment to keep connection alive
+                    yield ": keep-alive\n\n"
+        finally:
+            if device_id in active_connections:
+                del active_connections[device_id]
             
-            # Update last_ping
+            # Mark as offline
             device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
             if device:
-                device.last_ping = datetime.datetime.utcnow()
-                
-                # Optional: ESP32 can send its current screen state in the heartbeat
-                try:
-                    payload = json.loads(data)
-                    if "action" in payload:
-                        device.current_action = payload["action"]
-                except json.JSONDecodeError:
-                    pass
+                device.status = "offline"
                 db.commit()
-                
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for device_id: {device_id}")
-        if device_id in active_connections:
-            del active_connections[device_id]
-        
-        # Mark as offline
-        device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
-        if device:
-            device.status = "offline"
-            db.commit()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/api/device/status/{device_id}")
+async def update_device_status(device_id: str, req: DeviceStatusRequest, db: Session = Depends(get_db)):
+    """
+    ESP32 posts its current status/action here since SSE is one-way.
+    """
+    device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
+    if device:
+        device.current_action = req.action
+        device.last_ping = datetime.datetime.utcnow()
+        db.commit()
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Device not found")
 
 @app.post("/webhook")
 async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
@@ -255,9 +263,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                 
                 # Notify ALL connected ESP32s (Assuming single-machine setup)
                 logger.info(f"Broadcasting successful payment of {amount} INR to all connected devices.")
-                for device_id, ws in active_connections.items():
+                for device_id, queue in active_connections.items():
                     try:
-                        await ws.send_json({
+                        await queue.put({
                             "event": "payment_success",
                             "payment_id": payment_id,
                             "amount": amount,
@@ -270,7 +278,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                             device.current_action = f"Payment paid ({amount} INR)"
                             db.commit()
                     except Exception as e:
-                        logger.error(f"Failed to send to device {device_id}: {str(e)}")
+                        logger.error(f"Failed to queue message for device {device_id}: {str(e)}")
 
         except Exception as e:
             logger.error(f"Error processing webhook payload: {str(e)}")
@@ -285,9 +293,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             
             # Notify ALL connected ESP32s
             logger.info(f"Broadcasting failed payment of {amount} INR to all connected devices.")
-            for device_id, ws in active_connections.items():
+            for device_id, queue in active_connections.items():
                 try:
-                    await ws.send_json({
+                    await queue.put({
                         "event": "payment_failed",
                         "payment_id": payment_id,
                         "amount": amount,
