@@ -46,10 +46,7 @@ templates = Jinja2Templates(directory="templates")
 # Mapping of device_id (or reference_id) -> WebSocket
 active_connections: Dict[str, WebSocket] = {}
 
-class PaymentRequest(BaseModel):
-    amount: float  # Amount in INR
-    description: str = "ESP32 Kiosk Payment"
-    device_id: str = "unknown" # Passed by ESP32 to track which device made the request
+
 
 # --- Admin Dashboard UI Routes ---
 
@@ -129,53 +126,7 @@ async def get_logs(db: Session = Depends(get_db), current_user: str = Depends(au
 
 # --- ESP32 and Razorpay Routes ---
 
-@app.post("/api/payment/create")
-async def create_payment(req: PaymentRequest, db: Session = Depends(get_db)):
-    try:
-        amount_in_paise = int(req.amount * 100)
-        
-        payment_link_data = {
-            "amount": amount_in_paise,
-            "currency": "INR",
-            "accept_partial": False,
-            "description": req.description,
-            "customer": {
-                "name": "ESP32 Kiosk Customer",
-                "email": "customer@example.com",
-                "contact": "+919876543210" 
-            },
-            "notify": {
-                "sms": False,
-                "email": False
-            },
-            "reminder_enable": False,
-            "notes": {
-                "source": "esp32_kiosk",
-                "device_id": req.device_id
-            }
-        }
-        
-        payment_link = razorpay_client.payment_link.create(payment_link_data)
-        
-        # Save to DB
-        new_tx = models.Transaction(
-            payment_link_id=payment_link['id'],
-            amount=req.amount,
-            status=payment_link['status'],
-            device_id=req.device_id
-        )
-        db.add(new_tx)
-        db.commit()
-        
-        return {
-            "success": True,
-            "payment_link_id": payment_link['id'],
-            "payment_url": payment_link['short_url'],
-            "status": payment_link['status']
-        }
-    except Exception as e:
-        logger.error(f"Error creating payment link: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.websocket("/ws/status/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, db: Session = Depends(get_db)):
@@ -271,43 +222,81 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     
     logger.info(f"Received webhook event: {event_type}")
 
-    if event_type in ['payment_link.paid', 'payment_link.cancelled']:
+    if event_type in ['payment.captured', 'payment_link.paid', 'qr_code.credited']:
         try:
-            payment_link_entity = payload['payload']['payment_link']['entity']
-            payment_link_id = payment_link_entity['id']
-            status = payment_link_entity['status']
-            device_id = payment_link_entity.get('notes', {}).get('source') # Wait, we passed device_id in notes
-            # Actually we passed source='esp32_kiosk', device_id=req.device_id
-            notes = payment_link_entity.get('notes', {})
-            device_id = notes.get('device_id', 'unknown')
+            # Extract payment entity
+            payment_entity = None
+            if event_type == 'payment_link.paid':
+                if 'payment' in payload.get('payload', {}):
+                    payment_entity = payload['payload']['payment']['entity']
+                else:
+                    payment_entity = payload['payload']['payment_link']['entity']
+            elif event_type in ['qr_code.credited', 'payment.captured']:
+                payment_entity = payload['payload']['payment']['entity']
             
-            # Update transaction in DB
-            tx = db.query(models.Transaction).filter(models.Transaction.payment_link_id == payment_link_id).first()
-            if tx:
-                tx.status = status
-                # If paid, we might also get payment_id
-                if status == 'paid':
-                    order_id = payment_link_entity.get('order_id')
-                    tx.order_id = order_id
-                db.commit()
-            
-            # Notify ESP32
-            if device_id in active_connections:
-                ws = active_connections[device_id]
-                await ws.send_json({
-                    "event": event_type,
-                    "payment_link_id": payment_link_id,
-                    "status": status
-                })
+            if payment_entity:
+                payment_id = payment_entity.get('id')
+                amount_in_paise = payment_entity.get('amount', 0)
+                amount = amount_in_paise / 100.0
+                status = "paid"
                 
-                # Update device action
-                device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
-                if device:
-                    device.current_action = f"Payment {status}"
+                # Save transaction to DB if it doesn't exist
+                tx = db.query(models.Transaction).filter(models.Transaction.payment_id == payment_id).first()
+                if not tx:
+                    new_tx = models.Transaction(
+                        payment_id=payment_id,
+                        amount=amount,
+                        status=status,
+                        method=payment_entity.get('method', 'unknown'),
+                        device_id="static_qr_machine" # Using a placeholder since it's a static QR
+                    )
+                    db.add(new_tx)
                     db.commit()
-                    
+                
+                # Notify ALL connected ESP32s (Assuming single-machine setup)
+                logger.info(f"Broadcasting successful payment of {amount} INR to all connected devices.")
+                for device_id, ws in active_connections.items():
+                    try:
+                        await ws.send_json({
+                            "event": "payment_success",
+                            "payment_id": payment_id,
+                            "amount": amount,
+                            "status": status
+                        })
+                        
+                        # Update device action in DB
+                        device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
+                        if device:
+                            device.current_action = f"Payment paid ({amount} INR)"
+                            db.commit()
+                    except Exception as e:
+                        logger.error(f"Failed to send to device {device_id}: {str(e)}")
+
         except Exception as e:
             logger.error(f"Error processing webhook payload: {str(e)}")
+
+    elif event_type == 'payment.failed':
+        try:
+            payment_entity = payload['payload']['payment']['entity']
+            payment_id = payment_entity.get('id')
+            amount_in_paise = payment_entity.get('amount', 0)
+            amount = amount_in_paise / 100.0
+            status = "failed"
+            
+            # Notify ALL connected ESP32s
+            logger.info(f"Broadcasting failed payment of {amount} INR to all connected devices.")
+            for device_id, ws in active_connections.items():
+                try:
+                    await ws.send_json({
+                        "event": "payment_failed",
+                        "payment_id": payment_id,
+                        "amount": amount,
+                        "status": status
+                    })
+                except Exception as e:
+                    pass
+        except Exception as e:
+            logger.error(f"Error processing failed payment: {str(e)}")
 
     return JSONResponse(content={"status": "ok"})
 
