@@ -176,7 +176,15 @@ async def sse_endpoint(request: Request, device_id: str, db: Session = Depends(g
                 device.status = "offline"
                 db.commit()
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.post("/api/device/status/{device_id}")
 async def update_device_status(device_id: str, req: DeviceStatusRequest, db: Session = Depends(get_db)):
