@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 import cv2
 import numpy as np
 import urllib.request
+import requests
+import json
+import base64
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -139,17 +143,34 @@ async def create_order(device_id: str, request: Request):
     amount_in_paise = int(amount * 100)
     
     try:
-        qr_data = razorpay_client.qr_code.create({
+        key_id = os.getenv("RAZORPAY_KEY_ID")
+        key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+        auth_str = f"{key_id}:{key_secret}"
+        b64_auth = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+        
+        headers = {
+            "Authorization": f"Basic {b64_auth}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
             "type": "upi_qr",
             "name": f"Order for {device_id}",
             "usage": "single_use",
             "fixed_amount": True,
             "payment_amount": amount_in_paise,
-            "description": f"Juice order",
+            "description": "Juice order",
             "notes": {
                 "device_id": device_id
             }
-        })
+        }
+        
+        response = requests.post("https://api.razorpay.com/v1/payments/qr_codes", json=payload, headers=headers)
+        if response.status_code != 200:
+            logger.error(f"Razorpay API Error: {response.text}")
+            raise HTTPException(status_code=500, detail="Failed to create QR code at Razorpay")
+            
+        qr_data = response.json()
         qr_id = qr_data.get("id")
         image_url = qr_data.get("image_url")
         
