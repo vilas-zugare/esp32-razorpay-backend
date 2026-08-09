@@ -58,7 +58,46 @@ active_connections: Dict[str, asyncio.Queue] = {}
 active_qr_codes: Dict[str, str] = {}
 
 class DeviceStatusRequest(BaseModel):
-    action: str# --- Admin Dashboard UI Routes ---
+    action: str
+
+def check_qr_status_sync(qr_id: str):
+    key_id = os.getenv("RAZORPAY_KEY_ID")
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not key_id or not key_secret: return None
+    auth_str = f"{key_id}:{key_secret}"
+    b64_auth = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+    headers = {"Authorization": f"Basic {b64_auth}"}
+    try:
+        resp = requests.get(f"https://api.razorpay.com/v1/payments/qr_codes/{qr_id}", headers=headers, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Sync poll error: {e}")
+    return None
+
+async def poll_qr_status(device_id: str, qr_id: str):
+    logger.info(f"Starting fallback polling for QR: {qr_id}")
+    for _ in range(60): # Poll every 3 seconds for 3 minutes
+        await asyncio.sleep(3)
+        try:
+            qr_data = await asyncio.to_thread(check_qr_status_sync, qr_id)
+            if qr_data:
+                received = qr_data.get("payments_amount_received", 0)
+                expected = qr_data.get("payment_amount", 1)
+                # If payment is fully received
+                if received >= expected and expected > 0:
+                    logger.info(f"Polling SUCCESS for {device_id}, Amount: {received}")
+                    if device_id in active_connections:
+                        await active_connections[device_id].put({
+                            "event": "payment_success",
+                            "status": "paid",
+                            "amount": received / 100.0
+                        })
+                    break
+        except Exception as e:
+            logger.error(f"Async poll error: {e}")
+
+# --- Admin Dashboard UI Routes ---
 
 @app.get("/admin/login", response_class=HTMLResponse)
 async def login_page(request: Request):
@@ -173,6 +212,10 @@ async def create_order(device_id: str, request: Request):
         qr_data = response.json()
         qr_id = qr_data.get("id")
         image_url = qr_data.get("image_url")
+        
+        # Start fallback polling in the background!
+        if qr_id:
+            asyncio.create_task(poll_qr_status(device_id, qr_id))
         
         # Store in mapping
         active_qr_codes[qr_id] = device_id
