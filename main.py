@@ -12,6 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import razorpay
 from dotenv import load_dotenv
+import cv2
+import numpy as np
+import urllib.request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -46,6 +49,9 @@ templates = Jinja2Templates(directory="templates")
 # In-memory storage for active SSE queues
 # Mapping of device_id -> asyncio.Queue
 active_connections: Dict[str, asyncio.Queue] = {}
+
+# In-memory mapping of qr_id to device_id
+active_qr_codes: Dict[str, str] = {}
 
 class DeviceStatusRequest(BaseModel):
     action: str# --- Admin Dashboard UI Routes ---
@@ -126,7 +132,45 @@ async def get_logs(db: Session = Depends(get_db), current_user: str = Depends(au
 
 # --- ESP32 and Razorpay Routes ---
 
-
+@app.post("/api/order/create/{device_id}")
+async def create_order(device_id: str, request: Request):
+    data = await request.json()
+    amount = data.get("amount", 1.0) # amount in rupees
+    amount_in_paise = int(amount * 100)
+    
+    try:
+        qr_data = razorpay_client.qr_code.create({
+            "type": "upi_qr",
+            "name": f"Order for {device_id}",
+            "usage": "single_use",
+            "fixed_amount": True,
+            "payment_amount": amount_in_paise,
+            "description": f"Juice order",
+            "notes": {
+                "device_id": device_id
+            }
+        })
+        qr_id = qr_data.get("id")
+        image_url = qr_data.get("image_url")
+        
+        # Store in mapping
+        active_qr_codes[qr_id] = device_id
+        
+        # Decode the image to get UPI string
+        req = urllib.request.urlopen(image_url)
+        arr = np.asarray(bytearray(req.read()), dtype=np.uint8)
+        img = cv2.imdecode(arr, -1)
+        detector = cv2.QRCodeDetector()
+        val, _, _ = detector.detectAndDecode(img)
+        
+        if not val:
+            # Fallback if detection fails (rare but possible)
+            raise HTTPException(status_code=500, detail="Failed to decode QR code")
+            
+        return {"qr_id": qr_id, "qr_string": val}
+    except Exception as e:
+        logger.error(f"Error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stream/status/{device_id}")
 async def sse_endpoint(request: Request, device_id: str, db: Session = Depends(get_db)):
@@ -243,14 +287,20 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     if event_type in ['payment.captured', 'payment_link.paid', 'qr_code.credited']:
         try:
-            # Extract payment entity
             payment_entity = None
+            device_id = "static_qr_machine" # Default fallback
+            
             if event_type == 'payment_link.paid':
                 if 'payment' in payload.get('payload', {}):
                     payment_entity = payload['payload']['payment']['entity']
                 else:
                     payment_entity = payload['payload']['payment_link']['entity']
-            elif event_type in ['qr_code.credited', 'payment.captured']:
+            elif event_type == 'qr_code.credited':
+                payment_entity = payload['payload']['payment']['entity']
+                qr_entity = payload.get('payload', {}).get('qr_code', {}).get('entity', {})
+                qr_id = qr_entity.get('id')
+                device_id = active_qr_codes.get(qr_id) or qr_entity.get('notes', {}).get('device_id', "static_qr_machine")
+            elif event_type == 'payment.captured':
                 payment_entity = payload['payload']['payment']['entity']
             
             if payment_entity:
@@ -267,14 +317,15 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                         amount=amount,
                         status=status,
                         method=payment_entity.get('method', 'unknown'),
-                        device_id="static_qr_machine" # Using a placeholder since it's a static QR
+                        device_id=device_id
                     )
                     db.add(new_tx)
                     db.commit()
                 
-                # Notify ALL connected ESP32s (Assuming single-machine setup)
-                logger.info(f"Broadcasting successful payment of {amount} INR to all connected devices.")
-                for device_id, queue in active_connections.items():
+                # Notify the correct ESP32 (or all if fallback)
+                if device_id in active_connections:
+                    logger.info(f"Broadcasting successful payment of {amount} INR to device {device_id}.")
+                    queue = active_connections[device_id]
                     try:
                         await queue.put({
                             "event": "payment_success",
@@ -290,6 +341,19 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                             db.commit()
                     except Exception as e:
                         logger.error(f"Failed to queue message for device {device_id}: {str(e)}")
+                else:
+                    # Fallback: notify all if we don't know the specific device
+                    logger.info(f"Broadcasting successful payment of {amount} INR to all connected devices.")
+                    for did, queue in active_connections.items():
+                        try:
+                            await queue.put({
+                                "event": "payment_success",
+                                "payment_id": payment_id,
+                                "amount": amount,
+                                "status": status
+                            })
+                        except Exception as e:
+                            pass
 
         except Exception as e:
             logger.error(f"Error processing webhook payload: {str(e)}")
