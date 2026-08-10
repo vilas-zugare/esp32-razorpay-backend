@@ -30,6 +30,14 @@ import auth
 # Initialize DB tables
 models.Base.metadata.create_all(bind=engine)
 
+# Auto-seed the database on startup
+try:
+    import seed_users
+    seed_users.seed()
+    print("Auto-seeding executed.")
+except Exception as e:
+    print(f"Failed to auto-seed database: {e}")
+
 # Load environment variables
 load_dotenv()
 
