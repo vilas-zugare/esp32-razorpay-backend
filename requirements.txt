@@ -6,7 +6,8 @@ websockets
 sqlalchemy
 jinja2
 python-jose[cryptography]
-passlib[bcrypt]
+passlib
+bcrypt==3.2.2
 python-multipart
 psycopg2-binary
 opencv-python-headless
