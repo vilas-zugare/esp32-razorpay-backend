@@ -96,6 +96,35 @@
                 </div>
             </div>
 
+            <!-- Users Table -->
+            <div class="glass rounded-2xl p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold"><i class="fa-solid fa-users text-primary mr-2"></i>Users Directory</h2>
+                    <div class="flex gap-2">
+                        <input type="text" id="searchUser" placeholder="Search Mobile..." class="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary">
+                        <button class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm transition-colors" onclick="fetchUsers()">
+                            <i class="fa-solid fa-rotate-right"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="border-b border-gray-700 text-gray-400 text-sm">
+                                <th class="pb-3 px-2">ID</th>
+                                <th class="pb-3 px-2">Mobile Number</th>
+                                <th class="pb-3 px-2">Wallet Balance (₹)</th>
+                                <th class="pb-3 px-2">Joined</th>
+                                <th class="pb-3 px-2">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-tbody" class="text-sm">
+                            <tr><td colspan="5" class="text-center py-4 text-gray-500">Loading users...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Webhook Logs -->
             <div class="glass rounded-2xl p-6">
                 <div class="flex justify-between items-center mb-6">
@@ -116,6 +145,21 @@
                     <p class="text-gray-500 text-sm text-center">Loading devices...</p>
                 </div>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- Reward Modal -->
+<div id="rewardModal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden flex justify-center items-center z-50">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-96 max-w-[90%] shadow-2xl">
+        <h3 class="text-xl font-bold mb-4 text-white">Apply Reward Code</h3>
+        <p class="text-sm text-gray-400 mb-4">Adding reward for User: <span id="rewardUserMobile" class="font-mono text-primary font-bold"></span></p>
+        <input type="hidden" id="rewardUserId">
+        <input type="text" id="rewardCodeInput" placeholder="Enter 8-char Code" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 mb-4 text-white focus:outline-none focus:border-primary uppercase" maxlength="8">
+        <div id="rewardStatus" class="text-sm mb-4 hidden"></div>
+        <div class="flex justify-end gap-3">
+            <button onclick="closeRewardModal()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 transition-colors">Cancel</button>
+            <button onclick="submitReward()" class="px-4 py-2 bg-primary hover:bg-primary/80 rounded-lg text-white font-bold transition-colors">Apply</button>
         </div>
     </div>
 </div>
@@ -249,20 +293,103 @@
         }
     }
 
+    async function fetchUsers() {
+        try {
+            const searchTerm = document.getElementById('searchUser').value;
+            const res = await fetch(`/api/admin/users${searchTerm ? '?search=' + searchTerm : ''}`);
+            const data = await res.json();
+            const tbody = document.getElementById('users-tbody');
+            
+            tbody.innerHTML = '';
+            
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-500">No users found</td></tr>';
+            }
+
+            data.forEach(u => {
+                tbody.innerHTML += `
+                    <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors cursor-pointer" onclick="openRewardModal(${u.id}, '${u.mobile_number}')">
+                        <td class="py-3 px-2 text-gray-400">#${u.id}</td>
+                        <td class="py-3 px-2 font-mono text-gray-200">${u.mobile_number}</td>
+                        <td class="py-3 px-2 font-semibold text-accent">₹${u.wallet_balance}</td>
+                        <td class="py-3 px-2 text-gray-400 text-xs">${formatTime(u.created_at)}</td>
+                        <td class="py-3 px-2"><button class="text-xs bg-primary/20 text-primary px-2 py-1 rounded hover:bg-primary hover:text-white transition-colors">Reward</button></td>
+                    </tr>
+                `;
+            });
+        } catch (e) {
+            console.error("Failed to fetch users", e);
+        }
+    }
+
+    function openRewardModal(userId, mobile) {
+        document.getElementById('rewardUserId').value = userId;
+        document.getElementById('rewardUserMobile').innerText = mobile;
+        document.getElementById('rewardCodeInput').value = '';
+        document.getElementById('rewardStatus').className = 'hidden';
+        document.getElementById('rewardModal').classList.remove('hidden');
+    }
+
+    function closeRewardModal() {
+        document.getElementById('rewardModal').classList.add('hidden');
+    }
+
+    async function submitReward() {
+        const userId = document.getElementById('rewardUserId').value;
+        const code = document.getElementById('rewardCodeInput').value.trim().toUpperCase();
+        const statusDiv = document.getElementById('rewardStatus');
+        
+        if (!code || code.length !== 8) {
+            statusDiv.innerText = "Please enter a valid 8-character code.";
+            statusDiv.className = "text-sm mb-4 text-red-400 block";
+            return;
+        }
+
+        statusDiv.innerText = "Processing...";
+        statusDiv.className = "text-sm mb-4 text-yellow-400 block";
+
+        try {
+            const res = await fetch('/api/admin/users/reward', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: parseInt(userId), reward_code: code})
+            });
+            const data = await res.json();
+            
+            if (res.ok) {
+                statusDiv.innerText = data.message;
+                statusDiv.className = "text-sm mb-4 text-green-400 block";
+                setTimeout(() => {
+                    closeRewardModal();
+                    fetchUsers();
+                }, 1500);
+            } else {
+                statusDiv.innerText = data.detail || "Failed to apply reward";
+                statusDiv.className = "text-sm mb-4 text-red-400 block";
+            }
+        } catch (e) {
+            statusDiv.innerText = "Network error";
+            statusDiv.className = "text-sm mb-4 text-red-400 block";
+        }
+    }
+
     // Search listener
     document.getElementById('searchTx').addEventListener('keyup', fetchTransactions);
+    document.getElementById('searchUser').addEventListener('keyup', fetchUsers);
 
     // Initial Load & Polling setup
     function init() {
         fetchStats();
         fetchTransactions();
         fetchLogs();
+        fetchUsers();
         
         // Poll every 3 seconds for real-time feel without full websockets for dashboard
         setInterval(() => {
             fetchStats();
             fetchTransactions();
             fetchLogs();
+            fetchUsers();
         }, 3000);
     }
     

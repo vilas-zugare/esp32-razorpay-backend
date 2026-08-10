@@ -13,7 +13,36 @@ class Transaction(Base):
     status = Column(String, default="created") # created, paid, cancelled, failed
     method = Column(String, nullable=True) # upi, card, etc.
     device_id = Column(String, index=True, nullable=True)
+    payment_method = Column(String, default="QR")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mobile_number = Column(String, unique=True, index=True, nullable=False)
+    pin_hash = Column(String, nullable=False)
+    wallet_balance = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class RewardCode(Base):
+    __tablename__ = "reward_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, unique=True, index=True, nullable=False)
+    value = Column(Float, default=1.50)
+    status = Column(String, default="UNCLAIMED") # UNCLAIMED, CLAIMED
+    claimed_by_user_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class RateLimit(Base):
+    __tablename__ = "rate_limits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mobile_number = Column(String, index=True, nullable=False)
+    failed_attempts = Column(Integer, default=0)
+    last_attempt = Column(DateTime, default=datetime.datetime.utcnow)
 
 class Device(Base):
     __tablename__ = "devices"
