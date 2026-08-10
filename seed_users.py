@@ -10,6 +10,22 @@ def seed():
     models.Base.metadata.create_all(bind=engine)
     db = SessionLocal()
 
+    # Schema Migrations (ignoring errors if columns already exist)
+    from sqlalchemy import text
+    try:
+        db.execute(text("ALTER TABLE transactions ADD COLUMN payment_method VARCHAR DEFAULT 'QR'"))
+        db.commit()
+        print("Added payment_method column.")
+    except Exception:
+        db.rollback()
+
+    try:
+        db.execute(text("ALTER TABLE transactions ADD COLUMN idempotency_key VARCHAR"))
+        db.commit()
+        print("Added idempotency_key column.")
+    except Exception:
+        db.rollback()
+
     dummy_users = [
         {"mobile_number": "9999999991", "pin": "1111", "balance": 20.0},
         {"mobile_number": "9999999992", "pin": "2222", "balance": 20.0},
