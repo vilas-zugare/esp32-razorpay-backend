@@ -590,6 +590,13 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
     )
     db.add(new_tx)
     
+    coins_tx = models.CoinsTransaction(
+        user_id=user.id,
+        transaction_type="use_coins",
+        amount=-req.amount
+    )
+    db.add(coins_tx)
+    
     # 6. Generate Reward Code atomically
     code = generate_reward_code()
     # Ensure unique
@@ -631,6 +638,13 @@ async def claim_reward(req: RewardClaimRequest, db: Session = Depends(get_db)):
     reward.status = "CLAIMED"
     reward.claimed_by_user_id = user.id
     
+    coins_tx = models.CoinsTransaction(
+        user_id=user.id,
+        transaction_type="juice_code",
+        amount=reward.value
+    )
+    db.add(coins_tx)
+    
     db.commit()
 
     return {"status": "success", "message": f"₹{reward.value} added to wallet", "new_balance": user.wallet_balance}
@@ -651,6 +665,17 @@ async def create_user(req: CreateUserRequest, db: Session = Depends(get_db)):
     new_user = models.User(mobile_number=req.mobile_number, pin_hash=hashed, wallet_balance=req.initial_balance)
     db.add(new_user)
     db.commit()
+    db.refresh(new_user)
+    
+    if req.initial_balance > 0:
+        coins_tx = models.CoinsTransaction(
+            user_id=new_user.id,
+            transaction_type="add_money",
+            amount=req.initial_balance
+        )
+        db.add(coins_tx)
+        db.commit()
+        
     return {"status": "success"}
 
 if __name__ == "__main__":

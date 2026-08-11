@@ -62,3 +62,12 @@ class WebhookLog(Base):
     payload = Column(String) # Raw JSON string
     status = Column(String) # Valid, Invalid
     received_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class CoinsTransaction(Base):
+    __tablename__ = "coins_transaction"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    transaction_type = Column(String, nullable=False) # 'add_money', 'juice_code', 'use_coins'
+    amount = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
