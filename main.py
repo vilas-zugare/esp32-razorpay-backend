@@ -530,7 +530,9 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
             # We'll just return success. The reward code might be lost if it was a network drop on the first success,
             # but usually the reward is generated atomically. Let's find it.
             reward = db.query(models.RewardCode).filter(models.RewardCode.claimed_by_user_id == existing_tx.id).first() # not strictly correct linking, but good enough for this mock
-            return {"status": "success", "amount": existing_tx.amount, "reward_code": reward.code if reward else ""}
+            user_for_tx = db.query(models.User).filter(models.User.mobile_number == req.mobile_number).first()
+            bal = user_for_tx.wallet_balance if user_for_tx else 0.0
+            return {"status": "success", "amount": existing_tx.amount, "reward_code": reward.code if reward else "", "balance": bal}
         else:
             raise HTTPException(status_code=400, detail="Transaction failed previously.")
 
@@ -608,7 +610,7 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
             "status": "paid"
         }))
 
-    return {"status": "success", "amount": req.amount, "reward_code": code}
+    return {"status": "success", "amount": req.amount, "reward_code": code, "balance": user.wallet_balance}
 
 @app.post("/api/v1/rewards/claim")
 async def claim_reward(req: RewardClaimRequest, db: Session = Depends(get_db)):
