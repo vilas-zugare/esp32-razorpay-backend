@@ -30,6 +30,7 @@ def seed():
         {"mobile_number": "9999999991", "pin": "1111", "balance": 20.0},
         {"mobile_number": "9999999992", "pin": "2222", "balance": 20.0},
         {"mobile_number": "9999999993", "pin": "3333", "balance": 20.0},
+        {"mobile_number": "8080587261", "pin": "9897", "balance": 100.0},
     ]
 
     for d in dummy_users:
