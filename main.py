@@ -30,6 +30,16 @@ import auth
 # Initialize DB tables
 models.Base.metadata.create_all(bind=engine)
 
+# Auto-migrate new columns for RewardCode if they don't exist
+from sqlalchemy import text
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE reward_codes ADD COLUMN reward_type VARCHAR DEFAULT 'COINS'"))
+        conn.execute(text("ALTER TABLE reward_codes ADD COLUMN tickets INTEGER DEFAULT 0"))
+        conn.commit()
+except Exception as e:
+    pass # Columns already exist or other DB issue
+
 # Auto-seed the database on startup
 try:
     import seed_users
