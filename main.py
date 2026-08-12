@@ -511,6 +511,7 @@ class WalletChargeRequest(BaseModel):
     mobile_number: str
     pin: str
     amount: float
+    glasses: int = 1
     idempotency_key: str
 
 class RewardClaimRequest(BaseModel):
@@ -603,7 +604,7 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
     while db.query(models.RewardCode).filter(models.RewardCode.code == code).first():
         code = generate_reward_code()
         
-    reward = models.RewardCode(code=code, value=1.50)
+    reward = models.RewardCode(code=code, value=0.0, reward_type="TICKETS", tickets=req.glasses)
     db.add(reward)
     
     db.commit()

@@ -32,6 +32,8 @@ class RewardCode(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String, unique=True, index=True, nullable=False)
     value = Column(Float, default=1.50)
+    reward_type = Column(String, default="COINS") # COINS, TICKETS
+    tickets = Column(Integer, default=0)
     status = Column(String, default="UNCLAIMED") # UNCLAIMED, CLAIMED
     claimed_by_user_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
