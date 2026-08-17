@@ -19,6 +19,7 @@ import requests
 import json
 import base64
 import os
+import paho.mqtt.publish as publish
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -68,10 +69,6 @@ logger = logging.getLogger(__name__)
 # Ensure the 'templates' folder exists in the same directory as main.py
 templates = Jinja2Templates(directory="templates")
 
-# In-memory storage for active SSE queues
-# Mapping of device_id -> asyncio.Queue
-active_connections: Dict[str, asyncio.Queue] = {}
-
 # In-memory mapping of qr_id to device_id
 active_qr_codes: Dict[str, str] = {}
 
@@ -105,12 +102,11 @@ async def poll_qr_status(device_id: str, qr_id: str):
                 # If payment is fully received
                 if received >= expected and expected > 0:
                     logger.info(f"Polling SUCCESS for {device_id}, Amount: {received}")
-                    if device_id in active_connections:
-                        await active_connections[device_id].put({
-                            "event": "payment_success",
-                            "status": "paid",
-                            "amount": received / 100.0
-                        })
+                    try:
+                        payload = json.dumps({"status": "paid", "amount": received / 100.0})
+                        publish.single(f"vending/machine/{device_id}/status", payload=payload, hostname="broker.hivemq.com", port=1883)
+                    except Exception as e:
+                        logger.error(f"MQTT Publish error in polling: {e}")
                     break
         except Exception as e:
             logger.error(f"Async poll error: {e}")
@@ -288,66 +284,7 @@ async def create_order(device_id: str, request: Request):
         logger.error(f"Error creating order: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stream/status/{device_id}")
-async def sse_endpoint(request: Request, device_id: str, db: Session = Depends(get_db)):
-    """
-    ESP32 connects here to receive SSE push notifications of payment status.
-    """
-    client_ip = request.client.host if request.client else "unknown"
-    
-    # Update device status in DB
-    device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
-    if not device:
-        device = models.Device(device_id=device_id, ip_address=client_ip, status="online", current_action="Connected (SSE)")
-        db.add(device)
-    else:
-        device.status = "online"
-        device.ip_address = client_ip
-        device.last_ping = datetime.datetime.utcnow()
-        device.current_action = "Connected (SSE)"
-    db.commit()
-    
-    logger.info(f"SSE connected for device_id: {device_id}")
-    
-    queue = asyncio.Queue()
-    active_connections[device_id] = queue
-    
-    async def event_generator():
-        try:
-            while True:
-                if await request.is_disconnected():
-                    logger.info(f"SSE disconnected by client for device_id: {device_id}")
-                    break
-                    
-                try:
-                    # Wait for message with a timeout to check for disconnects
-                    data = await asyncio.wait_for(queue.get(), timeout=2.0)
-                    yield f"data: {json.dumps(data)}\n\n"
-                except asyncio.TimeoutError:
-                    # Send a comment to keep connection alive
-                    yield ": keep-alive\n\n"
-        finally:
-            if device_id in active_connections:
-                del active_connections[device_id]
-            
-            # Mark as offline using a fresh DB session
-            db_local = SessionLocal()
-            try:
-                device = db_local.query(models.Device).filter(models.Device.device_id == device_id).first()
-                if device:
-                    device.status = "offline"
-                    db_local.commit()
-            finally:
-                db_local.close()
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no"
-        }
-    )
 
 @app.post("/api/device/status/{device_id}")
 async def update_device_status(device_id: str, req: DeviceStatusRequest, db: Session = Depends(get_db)):
@@ -438,38 +375,19 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                     db.add(new_tx)
                     db.commit()
                 
-                # Notify the correct ESP32 (or all if fallback)
-                if device_id in active_connections:
-                    logger.info(f"Broadcasting successful payment of {amount} INR to device {device_id}.")
-                    queue = active_connections[device_id]
-                    try:
-                        await queue.put({
-                            "event": "payment_success",
-                            "payment_id": payment_id,
-                            "amount": amount,
-                            "status": status
-                        })
-                        
-                        # Update device action in DB
-                        device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
-                        if device:
-                            device.current_action = f"Payment paid ({amount} INR)"
-                            db.commit()
-                    except Exception as e:
-                        logger.error(f"Failed to queue message for device {device_id}: {str(e)}")
-                else:
-                    # Fallback: notify all if we don't know the specific device
-                    logger.info(f"Broadcasting successful payment of {amount} INR to all connected devices.")
-                    for did, queue in active_connections.items():
-                        try:
-                            await queue.put({
-                                "event": "payment_success",
-                                "payment_id": payment_id,
-                                "amount": amount,
-                                "status": status
-                            })
-                        except Exception as e:
-                            pass
+                # Publish successful payment to MQTT
+                logger.info(f"Publishing successful payment of {amount} INR to device {device_id} via MQTT.")
+                try:
+                    payload = json.dumps({"status": "paid", "amount": amount})
+                    publish.single(f"vending/machine/{device_id}/status", payload=payload, hostname="broker.hivemq.com", port=1883)
+                    
+                    # Update device action in DB
+                    device = db.query(models.Device).filter(models.Device.device_id == device_id).first()
+                    if device:
+                        device.current_action = f"Payment paid ({amount} INR)"
+                        db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to publish message via MQTT for device {device_id}: {str(e)}")
 
         except Exception as e:
             logger.error(f"Error processing webhook payload: {str(e)}")
@@ -482,18 +400,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             amount = amount_in_paise / 100.0
             status = "failed"
             
-            # Notify ALL connected ESP32s
-            logger.info(f"Broadcasting failed payment of {amount} INR to all connected devices.")
-            for device_id, queue in active_connections.items():
-                try:
-                    await queue.put({
-                        "event": "payment_failed",
-                        "payment_id": payment_id,
-                        "amount": amount,
-                        "status": status
-                    })
-                except Exception as e:
-                    pass
+            # We will just log the failure.
+            logger.info(f"Payment failed: {amount} INR.")
         except Exception as e:
             logger.error(f"Error processing failed payment: {str(e)}")
 
@@ -619,14 +527,12 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
     
     db.commit()
 
-    # Broadcast success to SSE just like Razorpay webhook
-    if device_id in active_connections:
-        queue = active_connections[device_id]
-        asyncio.create_task(queue.put({
-            "event": "payment_success",
-            "amount": req.amount,
-            "status": "paid"
-        }))
+    # Broadcast success to MQTT
+    try:
+        payload = json.dumps({"status": "paid", "amount": req.amount})
+        publish.single(f"vending/machine/{device_id}/status", payload=payload, hostname="broker.hivemq.com", port=1883)
+    except Exception as e:
+        logger.error(f"Failed to publish wallet success via MQTT: {e}")
 
     return {"status": "success", "amount": req.amount, "reward_code": code, "balance": user.wallet_balance}
 
