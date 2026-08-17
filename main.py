@@ -375,10 +375,20 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                     db.add(new_tx)
                     db.commit()
                 
+                # Generate Reward for UPI Payment (Option A: 15 coins/glass)
+                glasses = max(1, int(amount / 3.0))
+                code = generate_reward_code()
+                while db.query(models.RewardCode).filter(models.RewardCode.code == code).first():
+                    code = generate_reward_code()
+                
+                reward = models.RewardCode(code=code, value=15.0 * glasses, reward_type="COINS_AND_TICKETS", tickets=glasses)
+                db.add(reward)
+                db.commit()
+
                 # Publish successful payment to MQTT
                 logger.info(f"Publishing successful payment of {amount} INR to device {device_id} via MQTT.")
                 try:
-                    payload = json.dumps({"status": "paid", "amount": amount})
+                    payload = json.dumps({"status": "paid", "amount": amount, "reward_code": code})
                     publish.single(f"vending/machine/{device_id}/status", payload=payload, hostname="broker.hivemq.com", port=1883)
                     
                     # Update device action in DB
@@ -522,14 +532,14 @@ async def charge_wallet(req: WalletChargeRequest, device_id: str = "static_qr_ma
     while db.query(models.RewardCode).filter(models.RewardCode.code == code).first():
         code = generate_reward_code()
         
-    reward = models.RewardCode(code=code, value=0.0, reward_type="TICKETS", tickets=req.glasses)
+    reward = models.RewardCode(code=code, value=5.0 * req.glasses, reward_type="COINS_AND_TICKETS", tickets=req.glasses)
     db.add(reward)
     
     db.commit()
 
     # Broadcast success to MQTT
     try:
-        payload = json.dumps({"status": "paid", "amount": req.amount})
+        payload = json.dumps({"status": "paid", "amount": req.amount, "reward_code": code})
         publish.single(f"vending/machine/{device_id}/status", payload=payload, hostname="broker.hivemq.com", port=1883)
     except Exception as e:
         logger.error(f"Failed to publish wallet success via MQTT: {e}")
